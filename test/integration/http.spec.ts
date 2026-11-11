@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { MikroORM } from '@mikro-orm/postgresql';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { AppModule } from '../../src/app.module';
 import { HttpErrorFilter } from '../../src/http/http-error.filter';
+import { createOrmConfig } from '../../src/infrastructure/database/orm.config';
 import { createTestOrm, TEST_DATABASE_URL } from './support/database';
 import { unique } from './support/context';
 
@@ -36,10 +38,15 @@ const submit = (payload: Record<string, unknown>, key?: string) =>
     .set('Idempotency-Key', key ?? `${String(payload.providerId)}:${String(payload.externalTransactionId)}`)
     .send(payload);
 
+const WORKER_FLAGS = ['CONSUMER_ENABLED', 'OUTBOX_PUBLISHER_ENABLED', 'PENDING_REFERENCE_WORKER_ENABLED'];
+
 beforeAll(async () => {
   // Fresh schema in the test database, then the real application on top of it.
   await (await createTestOrm()).close(true);
   process.env.DATABASE_URL = TEST_DATABASE_URL;
+  process.env.LOG_LEVEL = 'silent';
+  // This file tests the HTTP entry only; the background loops have their own tests.
+  for (const flag of WORKER_FLAGS) process.env[flag] = 'false';
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
   app = moduleRef.createNestApplication();
   app.useGlobalFilters(new HttpErrorFilter());
@@ -48,6 +55,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app?.close();
+  for (const flag of WORKER_FLAGS) delete process.env[flag];
 });
 
 describe('POST /wallets', () => {
@@ -188,5 +196,75 @@ describe('queries', () => {
     expect(pages).toBe(3);
     expect(seen).toEqual(['100.00', '99.00', '98.00', '97.00', '96.00']);
     expect((await http().get(`/wallets/${target.walletId}/ledger?cursor=garbage`)).status).toBe(400);
+  });
+});
+
+describe('operations', () => {
+  it('liveness and readiness answer without authentication', async () => {
+    const live = await http().get('/health/live');
+    expect(live.status).toBe(200);
+    expect(live.body).toEqual({ status: 'ok' });
+
+    const ready = await http().get('/health/ready');
+    expect(ready.status).toBe(200);
+    expect(ready.body).toEqual({
+      status: 'ok',
+      checks: { postgres: { status: 'up' }, sqs: { status: 'up' } },
+    });
+  });
+
+  it('reconciliation confirms a healthy wallet', async () => {
+    const target = await createWallet('1000.00');
+    await submit(body(target, 'BET', '25.00'));
+    const res = await http().post(`/wallets/${target.walletId}/reconciliation`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      walletId: target.walletId,
+      storedBalance: { amount: '975.00', currency: 'BRL' },
+      calculatedBalance: { amount: '975.00', currency: 'BRL' },
+      difference: { amount: '0.00', currency: 'BRL' },
+      consistent: true,
+      checkedEntries: 2,
+    });
+    expect((await http().post('/wallets/00000000-0000-7000-8000-000000000000/reconciliation')).status).toBe(404);
+  });
+
+  it('reconciliation reports a divergence without fixing it', async () => {
+    const target = await createWallet('100.00');
+    // Corrupt the stored balance behind the application's back.
+    const orm = await MikroORM.init(createOrmConfig(TEST_DATABASE_URL));
+    await orm.em.getConnection().execute(`update wallets set balance = balance + 5 where id = ?`, [target.walletId]);
+
+    const res = await http().post(`/wallets/${target.walletId}/reconciliation`);
+    expect(res.body).toMatchObject({
+      storedBalance: { amount: '105.00', currency: 'BRL' },
+      calculatedBalance: { amount: '100.00', currency: 'BRL' },
+      difference: { amount: '5.00', currency: 'BRL' },
+      consistent: false,
+    });
+    const again = await http().post(`/wallets/${target.walletId}/reconciliation`);
+    expect(again.body.storedBalance.amount).toBe('105.00'); // still there: nothing was silently corrected
+
+    const metrics = await http().get('/metrics');
+    expect(metrics.text).toContain('wager_reconciliation_mismatches_total 2');
+    await orm.em.getConnection().execute(`update wallets set balance = balance - 5 where id = ?`, [target.walletId]);
+    await orm.close(true);
+  });
+
+  it('exposes the required metrics in Prometheus format', async () => {
+    const res = await http().get('/metrics');
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('text/plain');
+    for (const name of [
+      'wager_transactions_total{kind="BET",status="PROCESSED"}',
+      'wager_transactions_total{kind="BET",status="REJECTED"}',
+      'wager_duplicates_total{source="http"}',
+      'wager_idempotency_conflicts_total',
+      'wager_processing_duration_seconds_bucket',
+      'wager_outbox_pending',
+      'wager_outbox_lag_seconds',
+    ]) {
+      expect(res.text).toContain(name);
+    }
   });
 });

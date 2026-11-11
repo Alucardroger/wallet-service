@@ -5,7 +5,7 @@ import { OpenWalletUseCase } from '../application/open-wallet.use-case';
 import { WalletQueries } from '../application/ports';
 import { correlationIdOf } from './correlation';
 import { ProviderAuthGuard } from './provider-auth.guard';
-import { decodeCursor, encodeCursor, parseLimit, parseOpenWallet, parseUuid } from './validation';
+import { decodeCursor, encodeCursor, parseLimit, parseOpenWallet, parseUuid } from '../application/validation';
 import { ledgerEntryView, walletView } from './views';
 
 @Controller('wallets')

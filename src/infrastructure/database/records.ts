@@ -86,4 +86,17 @@ export const OutboxRecord = defineEntity({
 });
 export type OutboxRecord = InferEntity<typeof OutboxRecord>;
 
-export const records = [WalletRecord, WagerTransactionRecord, LedgerEntryRecord, OutboxRecord];
+export const InboxRecord = defineEntity({
+  name: 'InboxRecord',
+  tableName: 'inbox_messages',
+  properties: {
+    consumerName: p.string().primary(),
+    messageId: p.string().primary(),
+    payloadHash: p.string(),
+    receivedAt: p.datetime(),
+    processedAt: p.datetime().nullable(),
+  },
+});
+export type InboxRecord = InferEntity<typeof InboxRecord>;
+
+export const records = [WalletRecord, WagerTransactionRecord, LedgerEntryRecord, OutboxRecord, InboxRecord];

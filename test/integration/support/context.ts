@@ -5,6 +5,7 @@ import {
   type SubmitTransactionCommand,
 } from '../../../src/application/process-wager-transaction.use-case';
 import { WagerTransactionKind } from '../../../src/domain/wager-transaction';
+import { Metrics } from '../../../src/shared/metrics';
 import {
   MikroOrmUnitOfWork,
   MikroOrmWalletQueries,
@@ -15,6 +16,7 @@ export interface TestContext {
   orm: MikroORM;
   sql: Sql;
   uow: MikroOrmUnitOfWork;
+  metrics: Metrics;
   openWallet: OpenWalletUseCase;
   process: ProcessWagerTransactionUseCase;
   queries: MikroOrmWalletQueries;
@@ -23,13 +25,16 @@ export interface TestContext {
 /** Real use cases over a real PostgreSQL: nothing is mocked. */
 export async function createTestContext(): Promise<TestContext> {
   const orm = await createTestOrm();
-  const uow = new MikroOrmUnitOfWork(orm);
+  process.env.LOG_LEVEL ??= 'silent';
+  const metrics = new Metrics();
+  const uow = new MikroOrmUnitOfWork(orm, metrics);
   return {
     orm,
     sql: sqlRunner(orm),
     uow,
+    metrics,
     openWallet: new OpenWalletUseCase(uow),
-    process: new ProcessWagerTransactionUseCase(uow),
+    process: new ProcessWagerTransactionUseCase(uow, metrics),
     queries: new MikroOrmWalletQueries(orm),
   };
 }

@@ -1,6 +1,6 @@
-import { ValidationError } from '../application/errors';
-import type { OpenWalletCommand } from '../application/open-wallet.use-case';
-import type { SubmitTransactionCommand } from '../application/process-wager-transaction.use-case';
+import { ValidationError } from './errors';
+import type { OpenWalletCommand } from './open-wallet.use-case';
+import type { SubmitTransactionCommand } from './process-wager-transaction.use-case';
 import type { MoneyProps } from '../domain/money';
 import { WagerTransactionKind } from '../domain/wager-transaction';
 
@@ -111,4 +111,31 @@ export function decodeCursor(value: unknown): string | null {
   const match = /^v1:(\d{1,19})$/.exec(decoded);
   if (!match) throw new ValidationError('cursor is invalid');
   return match[1];
+}
+
+export interface QueueMessage {
+  messageId: string;
+  command: SubmitTransactionCommand;
+}
+
+/** Message of type WagerTransactionRequested received from the queue. */
+export function parseQueueMessage(raw: unknown): QueueMessage {
+  let json: Json;
+  try {
+    json = asObject(typeof raw === 'string' ? JSON.parse(raw) : raw, 'message');
+  } catch (error) {
+    if (error instanceof ValidationError) throw error;
+    throw new ValidationError('message body is not valid JSON');
+  }
+  const messageId = json.messageId;
+  if (typeof messageId !== 'string' || !IDEMPOTENCY_KEY.test(messageId)) {
+    throw new ValidationError('messageId is required (1-255 printable characters, no spaces)');
+  }
+  if (json.type !== 'WagerTransactionRequested') {
+    throw new ValidationError('type must be WagerTransactionRequested');
+  }
+  const data = asObject(json.data, 'data');
+  // The queue is a trusted internal channel, but the content goes through the
+  // same validation as the HTTP entry. The message id is the correlation id.
+  return { messageId, command: parseSubmitTransaction(data, data.idempotencyKey, messageId) };
 }

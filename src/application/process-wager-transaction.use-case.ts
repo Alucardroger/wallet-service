@@ -8,6 +8,7 @@ import {
   type EventContext,
 } from '../domain/events';
 import { FailureCode } from '../domain/failure-code';
+import { InboxMessage } from '../domain/inbox-message';
 import { LedgerDirection, type WalletLedgerEntry } from '../domain/ledger-entry';
 import { Money, type MoneyProps } from '../domain/money';
 import { OutboxMessage } from '../domain/outbox-message';
@@ -18,6 +19,8 @@ import {
 } from '../domain/wager-transaction';
 import type { Wallet } from '../domain/wallet';
 import { newId } from '../shared/ids';
+import { JsonLogger } from '../shared/logger';
+import { Metrics } from '../shared/metrics';
 import { IdempotencyConflictError, UniqueViolationError, ValidationError } from './errors';
 import { computePayloadHash } from './payload-hash';
 import { UnitOfWork, type WagerStore } from './ports';
@@ -34,6 +37,12 @@ export interface SubmitTransactionCommand {
   money: MoneyProps;
   referenceExternalTransactionId?: string;
   correlationId: string;
+}
+
+/** Present when the command came from the queue: identifies the message for the inbox. */
+export interface InboxReference {
+  consumerName: string;
+  messageId: string;
 }
 
 export interface TransactionResult {
@@ -66,9 +75,51 @@ const REVERSIBLE_BY: Partial<Record<WagerTransactionKind, WagerTransactionKind[]
 /** The single entry point used by both HTTP and the SQS consumer. */
 @Injectable()
 export class ProcessWagerTransactionUseCase {
-  constructor(private readonly uow: UnitOfWork) {}
+  private readonly logger = new JsonLogger(ProcessWagerTransactionUseCase.name);
 
-  async submit(command: SubmitTransactionCommand): Promise<TransactionResult> {
+  constructor(
+    private readonly uow: UnitOfWork,
+    private readonly metrics: Metrics,
+  ) {}
+
+  async submit(command: SubmitTransactionCommand, inbox?: InboxReference): Promise<TransactionResult> {
+    const source = inbox ? 'sqs' : 'http';
+    const startedAt = performance.now();
+    try {
+      const result = await this.submitWithRetry(command, inbox);
+      if (result.idempotentReplay) {
+        this.metrics.increment('wager_duplicates_total', { source });
+      } else {
+        this.metrics.increment('wager_transactions_total', { kind: command.kind, status: result.status });
+      }
+      this.logger.info(result.idempotentReplay ? 'transaction replayed' : 'transaction handled', {
+        correlationId: command.correlationId,
+        messageId: inbox?.messageId,
+        transactionId: result.transactionId,
+        walletId: command.walletId,
+        providerId: command.providerId,
+        kind: command.kind,
+        status: result.status,
+        failureCode: result.failureCode,
+        source,
+      });
+      return result;
+    } catch (error) {
+      if (error instanceof IdempotencyConflictError) {
+        this.metrics.increment('wager_idempotency_conflicts_total');
+      }
+      throw error;
+    } finally {
+      this.metrics.observe('wager_processing_duration_seconds', (performance.now() - startedAt) / 1000, {
+        source,
+      });
+    }
+  }
+
+  private async submitWithRetry(
+    command: SubmitTransactionCommand,
+    inbox?: InboxReference,
+  ): Promise<TransactionResult> {
     if (command.kind === WagerTransactionKind.Opening) {
       throw new ValidationError('OPENING is an internal kind and cannot be submitted');
     }
@@ -80,9 +131,12 @@ export class ProcessWagerTransactionUseCase {
     // transaction, so it answers as a replay instead of failing.
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await this.uow.run((store) => this.submitWithin(store, command, money, payloadHash));
+        return await this.uow.run((store) => this.submitWithin(store, command, money, payloadHash, inbox));
       } catch (error) {
-        if (error instanceof UniqueViolationError && attempt < 3) continue;
+        if (error instanceof UniqueViolationError && attempt < 3) {
+          this.metrics.increment('wager_lock_conflicts_total', { kind: 'insert_race' });
+          continue;
+        }
         throw error;
       }
     }
@@ -90,6 +144,23 @@ export class ProcessWagerTransactionUseCase {
 
   /** Called by the retry worker for a transaction waiting in PENDING_REFERENCE. */
   async retryPendingReference(transactionId: string, correlationId: string): Promise<TransactionResult | null> {
+    const result = await this.retryWithin(transactionId, correlationId);
+    if (result) {
+      this.metrics.increment('wager_retries_total', { component: 'pending_reference' });
+      if (result.status !== WagerTransactionStatus.PendingReference) {
+        this.metrics.increment('wager_transactions_total', { kind: 'REVERSAL', status: result.status });
+      }
+      this.logger.info('pending reference retried', {
+        correlationId,
+        transactionId,
+        status: result.status,
+        failureCode: result.failureCode,
+      });
+    }
+    return result;
+  }
+
+  private retryWithin(transactionId: string, correlationId: string): Promise<TransactionResult | null> {
     return this.uow.run(async (store) => {
       const unlocked = await store.findTransactionById(transactionId);
       if (!unlocked) return null;
@@ -111,10 +182,23 @@ export class ProcessWagerTransactionUseCase {
     command: SubmitTransactionCommand,
     money: Money,
     payloadHash: string,
+    inbox?: InboxReference,
   ): Promise<TransactionResult> {
     // The wallet row lock serializes every operation on this wallet, across all
     // instances. Different wallets do not wait for each other.
     const wallet = await store.lockWallet(command.walletId);
+
+    if (inbox) {
+      // The inbox row commits in the same SQL transaction as the financial
+      // effect, so a redelivered message can never apply it twice.
+      const received = InboxMessage.receive({ ...inbox, payloadHash, receivedAt: new Date() });
+      received.markProcessed(received.receivedAt);
+      if (!(await store.saveInbox(received))) {
+        const done = await store.findTransactionByIdempotencyKey(command.idempotencyKey);
+        if (!done) throw new Error(`Inbox has message ${inbox.messageId} but its transaction is missing`);
+        return this.toResult(done, wallet, true);
+      }
+    }
 
     const existing =
       (await store.findTransactionByIdempotencyKey(command.idempotencyKey)) ??

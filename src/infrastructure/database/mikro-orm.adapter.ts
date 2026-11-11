@@ -7,22 +7,33 @@ import {
 } from '@mikro-orm/postgresql';
 import { TransientInfrastructureError, UniqueViolationError } from '../../application/errors';
 import {
+  OutboxRepository,
   UnitOfWork,
   WalletQueries,
   type LedgerPageItem,
+  type RelayResult,
   type WagerStore,
 } from '../../application/ports';
 import type { FailureCode } from '../../domain/failure-code';
+import type { InboxMessage } from '../../domain/inbox-message';
 import { WalletLedgerEntry, type LedgerDirection } from '../../domain/ledger-entry';
 import { Money } from '../../domain/money';
-import type { OutboxMessage } from '../../domain/outbox-message';
+import { OutboxMessage } from '../../domain/outbox-message';
 import {
   WagerTransaction,
   type WagerTransactionKind,
   type WagerTransactionStatus,
 } from '../../domain/wager-transaction';
 import { Wallet } from '../../domain/wallet';
-import { LedgerEntryRecord, OutboxRecord, WagerTransactionRecord, WalletRecord } from './records';
+import { JsonLogger, describeError } from '../../shared/logger';
+import { Metrics } from '../../shared/metrics';
+import {
+  InboxRecord,
+  LedgerEntryRecord,
+  OutboxRecord,
+  WagerTransactionRecord,
+  WalletRecord,
+} from './records';
 
 /** How long a statement waits for a row lock before giving up (transient error). */
 export const LOCK_TIMEOUT_MS = Number(process.env.DB_LOCK_TIMEOUT_MS ?? 5_000);
@@ -200,6 +211,19 @@ class MikroOrmWagerStore implements WagerStore {
     await this.em.persist(record).flush();
   }
 
+  async saveInbox(message: InboxMessage): Promise<boolean> {
+    const key = { consumerName: message.consumerName, messageId: message.messageId };
+    if (await this.em.findOne(InboxRecord, key)) return false;
+    const record = this.em.create(InboxRecord, {
+      ...key,
+      payloadHash: message.payloadHash,
+      receivedAt: message.receivedAt,
+      processedAt: message.processedAt ?? null,
+    });
+    await this.em.persist(record).flush();
+    return true;
+  }
+
   private async findTransaction(where: Partial<WagerTransactionRecord>): Promise<WagerTransaction | null> {
     // refresh: always read the committed row, not a copy cached earlier in this transaction.
     const record = await this.em.findOne(WagerTransactionRecord, where, { refresh: true });
@@ -227,9 +251,14 @@ export function translateDatabaseError(error: unknown): unknown {
   return error;
 }
 
+const LOCK_SQLSTATES: Record<string, string> = { '55P03': 'lock_timeout', '40P01': 'deadlock', '40001': 'serialization' };
+
 @Injectable()
 export class MikroOrmUnitOfWork extends UnitOfWork {
-  constructor(private readonly orm: MikroORM) {
+  constructor(
+    private readonly orm: MikroORM,
+    private readonly metrics: Metrics,
+  ) {
     super();
   }
 
@@ -241,6 +270,85 @@ export class MikroOrmUnitOfWork extends UnitOfWork {
         await tem.execute(`set local lock_timeout = '${LOCK_TIMEOUT_MS}ms'`);
         return work(new MikroOrmWagerStore(tem));
       });
+    } catch (error) {
+      const lockKind = LOCK_SQLSTATES[String((error as { code?: unknown })?.code ?? '')];
+      if (lockKind) this.metrics.increment('wager_lock_conflicts_total', { kind: lockKind });
+      throw translateDatabaseError(error);
+    }
+  }
+}
+
+// ------------------------------------------------------------------ outbox
+
+@Injectable()
+export class MikroOrmOutboxRepository extends OutboxRepository {
+  private readonly logger = new JsonLogger(MikroOrmOutboxRepository.name);
+
+  constructor(private readonly orm: MikroORM) {
+    super();
+  }
+
+  async relay(limit: number, publish: (message: OutboxMessage) => Promise<void>): Promise<RelayResult> {
+    const em = this.orm.em.fork();
+    try {
+      return await em.transactional(async (tem) => {
+        // SKIP LOCKED: several publishers can run at once and each takes
+        // different rows, without waiting for one another.
+        const due = await tem.execute<{ id: string }[]>(
+          `select id from outbox_messages
+            where published_at is null and (next_attempt_at is null or next_attempt_at <= now())
+            order by seq
+            limit ?
+            for update skip locked`,
+          [limit],
+        );
+        const result: RelayResult = { published: 0, failed: 0 };
+        for (const { id } of due) {
+          const record = await tem.findOneOrFail(OutboxRecord, id);
+          const message = OutboxMessage.rehydrate({
+            id: record.id,
+            aggregateId: record.aggregateId,
+            eventType: record.eventType,
+            payload: record.payload,
+            occurredAt: record.occurredAt,
+            attempts: record.attempts,
+            nextAttemptAt: record.nextAttemptAt ?? undefined,
+            publishedAt: record.publishedAt ?? undefined,
+          });
+          const now = new Date();
+          try {
+            await publish(message);
+            message.markPublished(now);
+            result.published += 1;
+          } catch (error) {
+            message.scheduleRetry(now);
+            result.failed += 1;
+            this.logger.warn('outbox publish failed, will retry', {
+              eventId: message.id,
+              eventType: message.eventType,
+              attempts: message.attempts,
+              ...describeError(error),
+            });
+          }
+          record.attempts = message.attempts;
+          record.nextAttemptAt = message.nextAttemptAt ?? null;
+          record.publishedAt = message.publishedAt ?? null;
+        }
+        return result;
+      });
+    } catch (error) {
+      throw translateDatabaseError(error);
+    }
+  }
+
+  async stats(): Promise<{ pending: number; oldestAgeSeconds: number }> {
+    try {
+      const [row] = await this.orm.em.fork().execute<{ pending: number; age: number }[]>(
+        `select count(*)::int as pending,
+                coalesce(extract(epoch from now() - min(occurred_at)), 0)::float8 as age
+           from outbox_messages where published_at is null`,
+      );
+      return { pending: row.pending, oldestAgeSeconds: Math.max(0, Number(row.age)) };
     } catch (error) {
       throw translateDatabaseError(error);
     }
@@ -300,6 +408,36 @@ export class MikroOrmWalletQueries extends WalletQueries {
         }),
       };
     });
+  }
+
+  async ledgerTotals(walletId: string): Promise<{ credits: string; debits: string; entries: number }> {
+    const [row] = await this.read((em) =>
+      em.execute<{ credits: string; debits: string; entries: number }[]>(
+        `select coalesce(sum(amount) filter (where direction = 'CREDIT'), 0)::numeric(20,2)::text as credits,
+                coalesce(sum(amount) filter (where direction = 'DEBIT'), 0)::numeric(20,2)::text as debits,
+                count(*)::int as entries
+           from wallet_ledger_entries where wallet_id = ?`,
+        [walletId],
+      ),
+    );
+    return row;
+  }
+
+  async duePendingReferences(now: Date, limit: number): Promise<string[]> {
+    const rows = await this.read((em) =>
+      em.execute<{ id: string }[]>(
+        `select id from wager_transactions
+          where status = 'PENDING_REFERENCE' and next_reference_attempt_at <= ?
+          order by next_reference_attempt_at
+          limit ?`,
+        [now, limit],
+      ),
+    );
+    return rows.map((row) => row.id);
+  }
+
+  async ping(): Promise<void> {
+    await this.read((em) => em.execute('select 1'));
   }
 
   private async read<T>(query: (em: EntityManager) => Promise<T>): Promise<T> {

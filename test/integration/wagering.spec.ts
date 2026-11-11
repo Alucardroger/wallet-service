@@ -317,7 +317,7 @@ describe('atomicity', () => {
         ),
     };
     const bet = command(target, Kind.Bet, '25.00');
-    await expect(new ProcessWagerTransactionUseCase(failingUow).submit(bet)).rejects.toThrow('outbox unavailable');
+    await expect(new ProcessWagerTransactionUseCase(failingUow, ctx.metrics).submit(bet)).rejects.toThrow('outbox unavailable');
 
     expect(await balanceOf(ctx, target.walletId)).toBe('100.00');
     expect(await ledgerOf(ctx, target.walletId)).toHaveLength(1);

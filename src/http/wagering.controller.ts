@@ -6,7 +6,7 @@ import { ProcessWagerTransactionUseCase } from '../application/process-wager-tra
 import { WagerTransactionStatus } from '../domain/wager-transaction';
 import { correlationIdOf } from './correlation';
 import { ProviderAuthGuard } from './provider-auth.guard';
-import { parseSubmitTransaction, parseUuid } from './validation';
+import { parseSubmitTransaction, parseUuid } from '../application/validation';
 import { transactionView } from './views';
 
 /**

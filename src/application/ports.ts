@@ -1,3 +1,4 @@
+import type { InboxMessage } from '../domain/inbox-message';
 import type { WalletLedgerEntry } from '../domain/ledger-entry';
 import type { OutboxMessage } from '../domain/outbox-message';
 import type { WagerTransaction, WagerTransactionKind } from '../domain/wager-transaction';
@@ -21,6 +22,8 @@ export interface WagerStore {
   updateTransaction(tx: WagerTransaction): Promise<void>;
   insertLedgerEntry(entry: WalletLedgerEntry): Promise<void>;
   enqueueOutbox(message: OutboxMessage): Promise<void>;
+  /** Records a consumed message. Returns false when it was already recorded (a redelivery). */
+  saveInbox(message: InboxMessage): Promise<boolean>;
 }
 
 /** Runs the work in one SQL transaction: everything commits together or nothing does. */
@@ -43,4 +46,29 @@ export abstract class WalletQueries {
   ): Promise<WagerTransaction | null>;
   /** Entries after the given position, oldest first. */
   abstract ledgerPage(walletId: string, afterSeq: string | null, limit: number): Promise<LedgerPageItem[]>;
+  /** Totals of the ledger of one wallet, as exact decimal strings. */
+  abstract ledgerTotals(walletId: string): Promise<{ credits: string; debits: string; entries: number }>;
+  /** Ids of PENDING_REFERENCE transactions whose next attempt is due. */
+  abstract duePendingReferences(now: Date, limit: number): Promise<string[]>;
+  /** Throws when the database cannot be reached. */
+  abstract ping(): Promise<void>;
+}
+
+/** Sends one integration event to the outside world. */
+export abstract class EventPublisher {
+  abstract publish(message: OutboxMessage): Promise<void>;
+}
+
+export interface RelayResult {
+  published: number;
+  failed: number;
+}
+
+export abstract class OutboxRepository {
+  /**
+   * Takes up to `limit` due messages that no other publisher is holding, hands
+   * each one to `publish` and stores the outcome (published, or retry later).
+   */
+  abstract relay(limit: number, publish: (message: OutboxMessage) => Promise<void>): Promise<RelayResult>;
+  abstract stats(): Promise<{ pending: number; oldestAgeSeconds: number }>;
 }

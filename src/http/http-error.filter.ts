@@ -1,4 +1,4 @@
-import { Catch, HttpException, HttpStatus, Logger, type ArgumentsHost, type ExceptionFilter } from '@nestjs/common';
+import { Catch, HttpException, HttpStatus, type ArgumentsHost, type ExceptionFilter } from '@nestjs/common';
 import type { Response } from 'express';
 import {
   ApplicationError,
@@ -9,6 +9,7 @@ import {
   WalletAlreadyExistsError,
 } from '../application/errors';
 import { DomainError } from '../domain/errors';
+import { JsonLogger, describeError } from '../shared/logger';
 
 /**
  * One place that decides the HTTP status of every error:
@@ -21,14 +22,19 @@ import { DomainError } from '../domain/errors';
  */
 @Catch()
 export class HttpErrorFilter implements ExceptionFilter {
-  private readonly logger = new Logger(HttpErrorFilter.name);
+  private readonly logger = new JsonLogger(HttpErrorFilter.name);
 
   catch(exception: unknown, host: ArgumentsHost): void {
     const res = host.switchToHttp().getResponse<Response>();
     const { status, code, message } = this.describe(exception);
     if (status === HttpStatus.SERVICE_UNAVAILABLE) res.setHeader('Retry-After', '1');
     if (status >= 500) {
-      this.logger.error(`${code}: ${exception instanceof Error ? exception.stack : String(exception)}`);
+      this.logger.error('request failed', {
+        code,
+        correlationId: res.getHeader('X-Correlation-Id') as string | undefined,
+        ...describeError(exception),
+        stack: exception instanceof Error ? exception.stack : undefined,
+      });
     }
     res.status(status).json({ error: { code, message } });
   }
