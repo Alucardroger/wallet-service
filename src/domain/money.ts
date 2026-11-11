@@ -5,7 +5,7 @@ import { CurrencyMismatchError, InvalidMoneyError } from './errors';
 const D = Decimal.clone({ precision: 40 });
 
 // Exactly 2 decimal places, no sign, no exponent, up to 18 integer digits
-// (fits the NUMERIC(20,2) column we will use in PostgreSQL).
+// (fits the NUMERIC(20,2) column used in PostgreSQL).
 const AMOUNT_PATTERN = /^(0|[1-9]\d{0,17})\.\d{2}$/;
 const CURRENCY_PATTERN = /^[A-Z]{3}$/;
 
