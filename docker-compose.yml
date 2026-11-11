@@ -1,3 +1,5 @@
+# docker compose up -d --build   -> PostgreSQL, SQS (MiniStack), migrations and 3 app instances
+# docker compose up -d postgres ministack   -> only the infrastructure (local development and tests)
 services:
   postgres:
     image: postgres:17-alpine
@@ -15,10 +17,45 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  # AWS SQS emulator (free, no account). The image ships its own health check.
   ministack:
     image: nahuelnucera/ministack
     ports:
       - "4566:4566"
+
+  # Runs once, applies pending migrations and exits. The app waits for it.
+  migrate:
+    build: .
+    command: ["bun", "run", "src/infrastructure/database/migrate.ts", "up"]
+    environment:
+      DATABASE_URL: postgresql://wallet:wallet@postgres:5432/wallet
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # Three instances share the database and the queues: http://localhost:3000, :3001 and :3002
+  app:
+    build: .
+    deploy:
+      replicas: 3
+    ports:
+      - "3000-3002:3000"
+    environment:
+      DATABASE_URL: postgresql://wallet:wallet@postgres:5432/wallet
+      SQS_ENDPOINT: http://ministack:4566
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      ministack:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://localhost:3000/health/live').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    stop_grace_period: 30s
+    restart: unless-stopped
 
 volumes:
   pgdata:

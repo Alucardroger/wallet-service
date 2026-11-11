@@ -21,6 +21,9 @@ export class SqsQueues implements OnApplicationShutdown {
       secretAccessKey: config.sqs.secretAccessKey(),
     },
     maxAttempts: 2,
+    // Always talk to SQS_ENDPOINT. The host inside a queue URL is how the server
+    // names itself, which is not reachable from another container.
+    useQueueUrlAsEndpoint: false,
   });
 
   private readonly urls = new Map<string, Promise<string>>();
