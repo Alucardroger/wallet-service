@@ -34,7 +34,7 @@ apenas como otimização.
 | `domain` | `Money`, `Wallet`, `WagerTransaction`, `WalletLedgerEntry`, `InboxMessage`, `OutboxMessage`, eventos | nada (sem NestJS, sem ORM) |
 | `application` | casos de uso, validação de entrada, portas (`UnitOfWork`, `WagerStore`, `WalletQueries`, `OutboxRepository`, `EventPublisher`) | `domain` |
 | `infrastructure` | adapter MikroORM, migrations, SQS, loops de background | `application`, `domain` |
-| `http` | controllers, filtro de erros, guard | `application` |
+| `http` | controllers, filtro de erros, guard e verificação de token | `application` |
 
 As classes de domínio seguem a regra de modelagem do desafio: construtor privado, factories estáticas
 (`create`/`open`/`from`/`receive`/`enqueue`) e `rehydrate`, que reconstrói estado persistido sem revalidar
@@ -206,7 +206,7 @@ Estáveis e legíveis por máquina (`failureCode` na resposta, na linha da trans
 Como a rejeição é o resultado definitivo daquela key, "corrigir" significa enviar uma nova transação
 com outro `externalTransactionId`. Erros de transporte usam `error.code`: `VALIDATION_ERROR`,
 `INVALID_MONEY`, `INVALID_TRANSACTION`, `IDEMPOTENCY_CONFLICT`, `WALLET_ALREADY_EXISTS`, `NOT_FOUND`,
-`TRANSIENT_FAILURE`.
+`TRANSIENT_FAILURE`, `UNAUTHENTICATED`, `FORBIDDEN`.
 
 ## 11. Mapeamento HTTP
 
@@ -219,6 +219,8 @@ com outro `externalTransactionId`. Erros de transporte usam `error.code`: `VALID
 | Recurso inexistente (consultas) | `404` |
 | Conflito de idempotência ou wallet duplicada | `409` |
 | Falha transitória de infraestrutura | `503` + `Retry-After` |
+| Token ausente ou inválido | `401` + `WWW-Authenticate: Bearer` |
+| Token válido sem permissão | `403` |
 | Wallet criada | `201` |
 
 O status depende apenas do estado da transação, então um replay recebe o mesmo status da resposta
@@ -323,21 +325,40 @@ um reaper a mais.
 
 ## 17. Autenticação
 
-**Não implementada**, conforme permitido pela seção 2 do desafio (não pontua e não deveria competir com
-correção financeira, concorrência e idempotência).
+Implementada com um **Identity Provider externo** (Keycloak, OIDC), sem autenticação artesanal: o
+serviço não tem tabela de usuários, senhas nem segredo de assinatura.
 
-Ponto de extensão: `ProviderAuthGuard` (`src/http/provider-auth.guard.ts`), aplicado a todos os
-controllers de negócio e hoje um no-op. Health e métricas ficam abertos.
+- **Fluxo**: cada provedor de jogos é um client com *client credentials*. Ele obtém um access token no
+  Keycloak e o envia em `Authorization: Bearer`.
+- **Validação** (`TokenVerifier`, biblioteca `jose`): assinatura conferida com as chaves públicas do
+  Keycloak (JWKS, buscadas sob demanda e mantidas em cache), além de `iss`, `aud` e `exp`. Só
+  algoritmos assimétricos são aceitos; token sem assinatura (`alg: none`) é recusado.
+- **Identidade vem do token, nunca da requisição.** O realm grava em cada client as claims
+  `provider_id` e `wagering_role` (`provider` ou `operator`) e a audiência `wagering-api`.
+- **Autorização** (`ProviderAuthGuard`):
 
-Desenho que seria adotado:
+| Regra | Resposta |
+| --- | --- |
+| Sem token, token inválido, expirado, de outro emissor ou outra audiência | `401` |
+| `providerId` do corpo ou da rota diferente do `provider_id` do token | `403` |
+| Provedor em endpoint de operador (`POST /wallets`, reconciliação) | `403` |
+| Provedor consultando por id uma transação de outro provedor | `404` (não revela que existe) |
+| Token válido sem `provider_id` e sem papel de operador | `403` |
+| Keycloak inacessível para buscar as chaves | `503` (falha transitória, não culpa do chamador) |
 
-- Identity Provider externo (Keycloak ou Zitadel no Compose), sem tabela própria de usuários.
-- Cada provedor é um client OIDC com fluxo **client credentials**; a API valida o JWT (assinatura via
-  JWKS, `iss`, `aud`, `exp`).
-- Uma claim identifica o provedor. O guard recusa (`403`) requisições cujo `providerId` do corpo ou da
-  rota seja diferente dessa claim; a criação de wallets e a reconciliação exigiriam um escopo de operador.
-- Mensagens da fila são canal interno confiável, mas o `providerId` da mensagem passa pelas mesmas
-  validações de domínio.
+- O operador pode criar wallets, reconciliar e atuar por qualquer provedor. Consultas de wallet e
+  ledger aceitam qualquer identidade autenticada.
+- **Escopo**: health e métricas ficam abertos. Mensagens da fila são canal interno confiável; o
+  `providerId` da mensagem passa pelas mesmas validações de domínio.
+- **Chave `AUTH_ENABLED`**: ligada no Docker Compose e desligada por padrão em desenvolvimento local e
+  nos demais testes, que exercitam regras financeiras e não precisam de um IdP. Em produção ficaria
+  sempre ligada.
+- **Emissor e JWKS são configurados separadamente** (`AUTH_ISSUER` e `AUTH_JWKS_URL`): no Compose, o
+  token é emitido em `localhost:8080`, mas a aplicação alcança o Keycloak pela rede interna.
+
+Limitações desta parte: Keycloak em modo de desenvolvimento e secrets fixos no realm (apenas ambiente
+local); as wallets não são associadas a provedores, então qualquer provedor autenticado pode consultar
+uma wallet cujo id conheça; não há rate limiting por client.
 
 ## 18. Estratégia de testes
 
@@ -350,11 +371,13 @@ Desenho que seria adotado:
   sob carga e substituída por outra.
 - Falhas são simuladas na borda certa: o "worker que morre antes do ack" usa a fila real e falha
   exatamente no `DeleteMessage`; o "processo que morre antes de publicar" usa a outbox real.
+- **Autenticação**: o guard e a verificação de assinatura são reais; o IdP é substituído por um servidor
+  HTTP que publica uma chave pública (JWKS), como o Keycloak faz, e os tokens são assinados no teste.
 - Todo arquivo termina verificando que nenhuma wallet diverge do seu ledger.
 
 ## 19. Limitações conhecidas
 
-- **Sem autenticação** (seção 17).
+- **Autenticação** com as limitações descritas na seção 17 (IdP em modo de desenvolvimento, wallets sem dono por provedor).
 - **Métricas em memória, por instância.** O agregador (Prometheus) soma as instâncias; contadores zeram
   no restart. OpenTelemetry e dashboards não foram implementados.
 - **Hot wallet é serial** por desenho (seção 5).

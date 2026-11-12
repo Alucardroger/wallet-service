@@ -1,4 +1,4 @@
-# docker compose up -d --build   -> PostgreSQL, SQS (MiniStack), migrations and 3 app instances
+# docker compose up -d --build   -> PostgreSQL, SQS (MiniStack), Keycloak, migrations and 3 app instances
 # docker compose up -d postgres ministack   -> only the infrastructure (local development and tests)
 services:
   postgres:
@@ -23,6 +23,22 @@ services:
     ports:
       - "4566:4566"
 
+  # External Identity Provider (OIDC). The "wagering" realm, with one client per
+  # game provider and one operator client, is imported from ./keycloak at startup.
+  # Development mode and fixed secrets: for local use only.
+  keycloak:
+    image: keycloak/keycloak:26.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./keycloak/wagering-realm.json:/opt/keycloak/data/import/wagering-realm.json:ro
+
   # Runs once, applies pending migrations and exits. The app waits for it.
   migrate:
     build: .
@@ -44,6 +60,12 @@ services:
     environment:
       DATABASE_URL: postgresql://wallet:wallet@postgres:5432/wallet
       SQS_ENDPOINT: http://ministack:4566
+      AUTH_ENABLED: "true"
+      # Tokens are requested from the host at localhost:8080, so that is their issuer.
+      # The app reaches the same Keycloak through the Compose network to fetch its keys.
+      AUTH_ISSUER: http://localhost:8080/realms/wagering
+      AUTH_JWKS_URL: http://keycloak:8080/realms/wagering/protocol/openid-connect/certs
+      AUTH_AUDIENCE: wagering-api
     depends_on:
       migrate:
         condition: service_completed_successfully

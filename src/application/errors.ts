@@ -35,6 +35,20 @@ export class NotFoundError extends ApplicationError {
   }
 }
 
+/** No token, or a token that cannot be trusted. */
+export class UnauthenticatedError extends ApplicationError {
+  constructor(message = 'A valid bearer token is required') {
+    super('UNAUTHENTICATED', message);
+  }
+}
+
+/** A valid token that is not allowed to do this. */
+export class ForbiddenError extends ApplicationError {
+  constructor(message = 'This identity is not allowed to perform this operation') {
+    super('FORBIDDEN', message);
+  }
+}
+
 /** Temporary infrastructure problem: the same request can be sent again later. */
 export class TransientInfrastructureError extends ApplicationError {
   constructor(message: string, options?: { cause?: unknown }) {

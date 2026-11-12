@@ -8,7 +8,7 @@ import { SqsQueues } from '../infrastructure/sqs/sqs-queues';
 import { describeError } from '../shared/logger';
 import { Metrics } from '../shared/metrics';
 import { correlationIdOf } from './correlation';
-import { ProviderAuthGuard } from './provider-auth.guard';
+import { OperatorOnly, ProviderAuthGuard } from './provider-auth.guard';
 
 /** Health checks and metrics: open endpoints, no authentication. */
 @Controller()
@@ -61,6 +61,7 @@ export class ReconciliationController {
 
   @Post(':walletId/reconciliation')
   @HttpCode(200)
+  @OperatorOnly()
   run(@Param('walletId') walletId: string, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
     return this.reconcile.execute(parseUuid(walletId, 'walletId'), correlationIdOf(req, res));
   }

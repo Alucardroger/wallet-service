@@ -4,7 +4,7 @@ import { NotFoundError } from '../application/errors';
 import { OpenWalletUseCase } from '../application/open-wallet.use-case';
 import { WalletQueries } from '../application/ports';
 import { correlationIdOf } from './correlation';
-import { ProviderAuthGuard } from './provider-auth.guard';
+import { OperatorOnly, ProviderAuthGuard } from './provider-auth.guard';
 import { decodeCursor, encodeCursor, parseLimit, parseOpenWallet, parseUuid } from '../application/validation';
 import { ledgerEntryView, walletView } from './views';
 
@@ -18,6 +18,7 @@ export class WalletsController {
 
   @Post()
   @HttpCode(201)
+  @OperatorOnly()
   async open(@Body() body: unknown, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const wallet = await this.openWallet.execute(parseOpenWallet(body, correlationIdOf(req, res)));
     return walletView(wallet);

@@ -5,7 +5,7 @@ import { WalletQueries } from '../application/ports';
 import { ProcessWagerTransactionUseCase } from '../application/process-wager-transaction.use-case';
 import { WagerTransactionStatus } from '../domain/wager-transaction';
 import { correlationIdOf } from './correlation';
-import { ProviderAuthGuard } from './provider-auth.guard';
+import { ProviderAuthGuard, assertCanSeeProvider } from './provider-auth.guard';
 import { parseSubmitTransaction, parseUuid } from '../application/validation';
 import { transactionView } from './views';
 
@@ -46,9 +46,10 @@ export class WageringController {
   }
 
   @Get('wagering/transactions/:transactionId')
-  async byId(@Param('transactionId') transactionId: string) {
+  async byId(@Param('transactionId') transactionId: string, @Req() req: Request) {
     const tx = await this.queries.findTransaction(parseUuid(transactionId, 'transactionId'));
     if (!tx) throw new NotFoundError('Transaction');
+    assertCanSeeProvider(req, tx.providerId);
     return transactionView(tx);
   }
 

@@ -7,6 +7,7 @@ import { EventPublisher, OutboxRepository, UnitOfWork, WalletQueries } from './a
 import { ProcessWagerTransactionUseCase } from './application/process-wager-transaction.use-case';
 import { ReconcileWalletUseCase } from './application/reconcile-wallet.use-case';
 import { HealthController, ReconciliationController } from './http/operations.controller';
+import { TokenVerifier } from './http/token-verifier';
 import { WageringController } from './http/wagering.controller';
 import { WalletsController } from './http/wallets.controller';
 import { BackgroundWorkers } from './infrastructure/background-workers';
@@ -41,6 +42,7 @@ class DatabaseLifecycle implements OnApplicationShutdown {
     { provide: OutboxRepository, useClass: MikroOrmOutboxRepository },
     { provide: EventPublisher, useClass: SqsEventPublisher },
     Metrics,
+    TokenVerifier,
     SqsQueues,
     OpenWalletUseCase,
     ProcessWagerTransactionUseCase,

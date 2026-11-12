@@ -10,6 +10,17 @@ const flag = (name: string, fallback: boolean): boolean =>
 export const config = {
   port: () => int('PORT', 3000),
   logLevel: () => text('LOG_LEVEL', 'info'),
+  auth: {
+    /** Off by default (local development and tests). Docker Compose turns it on. */
+    enabled: () => flag('AUTH_ENABLED', false),
+    /** Expected "iss" of the tokens, e.g. http://localhost:8080/realms/wagering */
+    issuer: () => text('AUTH_ISSUER', 'http://localhost:8080/realms/wagering'),
+    /** Where the Identity Provider publishes its public keys. */
+    jwksUrl: () =>
+      text('AUTH_JWKS_URL', 'http://localhost:8080/realms/wagering/protocol/openid-connect/certs'),
+    /** Expected "aud" of the tokens. */
+    audience: () => text('AUTH_AUDIENCE', 'wagering-api'),
+  },
   sqs: {
     endpoint: () => text('SQS_ENDPOINT', 'http://localhost:4566'),
     region: () => text('AWS_REGION', 'us-east-1'),
