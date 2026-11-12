@@ -6,6 +6,7 @@ ordem, várias instâncias concorrentes e quedas no meio do processamento.
 
 - **Stack:** Bun 1.x · TypeScript estrito · NestJS · PostgreSQL · MikroORM · AWS SQS (MiniStack) · Keycloak (OIDC) · Docker Compose
 - **Decisões, trade-offs e limitações:** [ARCHITECTURE.md](./ARCHITECTURE.md)
+- **Teste de carga e análise:** [LOAD_TEST.md](./LOAD_TEST.md)
 
 ## Requisitos
 
@@ -53,6 +54,7 @@ Todas as configurações têm valor padrão e estão descritas em [`.env.example
 | `bun run test:unit` | Testes de unidade do domínio (não precisam de infraestrutura) |
 | `bun run test:int` | Testes de integração e concorrência (PostgreSQL e MiniStack reais) |
 | `bun run test` | Todos os testes |
+| `bun run test:load` | Teste de carga com 3 processos reais (resultados em [LOAD_TEST.md](./LOAD_TEST.md)) |
 | `bun run lint` | Lint |
 
 ## Testes

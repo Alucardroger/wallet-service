@@ -21,7 +21,8 @@
     "test:e2e": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --config ./test/jest-e2e.json",
     "test:unit": "bun test src",
     "test:int": "bun test test/integration",
-    "migrate": "bun run src/infrastructure/database/migrate.ts"
+    "migrate": "bun run src/infrastructure/database/migrate.ts",
+    "test:load": "bun run test/load/load-test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-sqs": "^3.1166.0",

@@ -283,7 +283,8 @@ reprocessa as vencidas com backoff exponencial.
   `WagerTransactionPendingReference` e `WalletBalanceChanged` (somente quando o saldo muda). Cada um é
   uma subclasse de `IntegrationEvent` com `eventType` e `version` no tipo; `data` carrega `MoneyProps`.
 
-Trade-off: a transação SQL do publisher fica aberta durante a chamada ao SQS. Os lotes são pequenos
+Trade-off: a transação SQL do publisher fica aberta durante a chamada ao SQS, e os eventos são enviados
+um a um. O teste de carga mediu o efeito disso (ver [LOAD_TEST.md](./LOAD_TEST.md)). Os lotes são pequenos
 (20) para limitar esse tempo; a alternativa (marcar "em envio" e confirmar depois) exigiria um estado e
 um reaper a mais.
 
@@ -387,7 +388,9 @@ uma wallet cujo id conheça; não há rate limiting por client.
 - **DLQ**: o reprocessamento é manual; não há ferramenta de redrive.
 - **Reversão parcial** está fora de escopo; REFUND + ROLLBACK da mesma BET são ambos aceitos (seção 8, item 3).
 - **Uma mensagem com `messageId` repetido e conteúdo diferente** é tratada como duplicata da primeira.
-- **Ledger de partidas simples** (não double-entry) e **sem teste de carga**: ambos eram diferenciais
-  opcionais.
+- **Publicação da outbox é sequencial**: cada publisher envia um evento por chamada ao SQS. No teste de
+  carga ([LOAD_TEST.md](./LOAD_TEST.md)) a publicação ficou em torno de 100 a 180 eventos por segundo e o
+  lag cresceu sob carga sustentada. A correção não é afetada; a melhoria natural é `SendMessageBatch`.
+- **Ledger de partidas simples** (não double-entry): era diferencial opcional.
 - **Criação das filas pela aplicação** é conveniência de ambiente local; em produção seriam provisionadas
   por infraestrutura como código (`SQS_CREATE_QUEUES=false`).
