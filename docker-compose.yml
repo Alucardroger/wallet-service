@@ -37,7 +37,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./keycloak/wagering-realm.json:/opt/keycloak/data/import/wagering-realm.json:ro
+      - ./keycloak:/opt/keycloak/data/import:ro
 
   # Runs once, applies pending migrations and exits. The app waits for it.
   migrate:
